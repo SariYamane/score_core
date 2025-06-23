@@ -1,0 +1,5 @@
+pydantic>=2.7
+faiss-cpu>=1.8
+scikit-learn>=1.4
+numpy>=1.26
+openai>=1.14

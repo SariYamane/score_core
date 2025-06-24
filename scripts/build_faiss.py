@@ -13,3 +13,10 @@ faiss_index.add(mat.toarray())              # メモリで OK なら
 os.makedirs(sys.argv[2], exist_ok=True)
 faiss.write_index(faiss_index, f"{sys.argv[2]}/index.faiss")
 joblib.dump(tfidf, f"{sys.argv[2]}/vectorizer.joblib")
+
+from sentence_transformers import SentenceTransformer
+sbert = SentenceTransformer("multi-qa-MiniLM-L6-cos-v1")     # 軽量＆高汎用
+emb = sbert.encode(text_list, show_progress_bar=True, convert_to_numpy=True)
+faiss_index = faiss.IndexFlatIP(emb.shape[1])
+faiss_index.add(emb.astype("float32"))
+

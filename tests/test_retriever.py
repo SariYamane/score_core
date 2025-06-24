@@ -1,6 +1,7 @@
 from datetime import datetime, UTC
 from pathlib import Path
 import shutil, tempfile, json
+from importlib import reload
 
 import numpy as np
 import pytest
@@ -8,39 +9,39 @@ import pytest
 from score_core import MemoryEntry
 from score_core import retriever
 
+from sentence_transformers import SentenceTransformer
+import faiss, joblib
+
+
 # ---- フィクスチャ ----------------------------------------------------
 @pytest.fixture(scope="module")
 def small_index(tmp_path_factory):
-    """
-    テスト用に 10 件だけの FAISS + TF-IDF インデックスを作る。
-    tmp_path は pytest が用意する一時ディレクトリ。
-    """
-    tmpdir = tmp_path_factory.mktemp("faiss_idx")
-    index_dir = Path(retriever.__file__).parent / "_faiss_index"
+    tmpdir  = tmp_path_factory.mktemp("faiss_idx")
+    idx_dir = tmpdir / "_faiss_index"
+    idx_dir.mkdir()
 
-    # ★ もし既に本物の index があるならコピーで済ませる
-    if index_dir.exists():
-        shutil.copytree(index_dir, tmpdir / "_faiss_index")
-    else:
-        # 例：ダミー行列をその場で作る場合
-        import faiss, joblib
-        from sklearn.feature_extraction.text import TfidfVectorizer
+    # ------------- SBERT 384次元インデックスを生成 -------------
+    texts = [f"dummy event {i}" for i in range(10)]
+    sbert = SentenceTransformer("multi-qa-MiniLM-L6-cos-v1")
+    emb   = sbert.encode(texts, convert_to_numpy=True).astype("float32")
 
-        texts = [f"dummy event {i}" for i in range(10)]
-        vectorizer = TfidfVectorizer(max_features=1000)
-        mat = vectorizer.fit_transform(texts).astype("float32")
-        faiss_index = faiss.IndexFlatIP(mat.shape[1])
-        faiss_index.add(mat.toarray())
+    ix = faiss.IndexFlatIP(emb.shape[1])      # 384 dims
+    ix.add(emb)
 
-        (tmpdir / "_faiss_index").mkdir()
-        faiss.write_index(faiss_index, tmpdir / "_faiss_index" / "index.faiss")
-        joblib.dump(vectorizer, tmpdir / "_faiss_index" / "vectorizer.joblib")
+    faiss.write_index(ix, str(idx_dir / "index.faiss"))   # ← str() が必須
+    joblib.dump(None, idx_dir / "vectorizer.joblib")      # ダミーファイル
 
-    # retriever 内のグローバル変数を上書き
-    retriever._INDEX_DIR = tmpdir / "_faiss_index"
-    from importlib import reload
-    reload(retriever)         # 再ロードして _TFIDF / _FAISS を読み直す
+    # ------------- retriever を切り替え -----------------------
+    retriever._get_faiss.cache_clear()
+    retriever._get_tfidf.cache_clear()
+    retriever._get_sbert.cache_clear()
+
+    reload(retriever)                         # ここで 384 次元をロード
+    retriever._INDEX_DIR = idx_dir            # 新しい場所に更新
+    retriever._get_faiss.cache_clear()
+    
     return tmpdir
+
 
 # ---- 実テスト --------------------------------------------------------
 def test_retrieve_topk(small_index):
@@ -57,3 +58,18 @@ def test_retrieve_topk(small_index):
 
     assert len(topk) == 5
     assert all(isinstance(m, MemoryEntry) for m in topk)
+
+def test_kernel_monotonic():
+    high = retriever.score_kernel(
+        sim=np.array([0.9]),
+        sent_delta=np.array([0]),
+        recency=np.array([1]),
+        importance=np.array([1])
+    )
+    low = retriever.score_kernel(
+        sim=np.array([0.1]),
+        sent_delta=np.array([0]),
+        recency=np.array([1]),
+        importance=np.array([1])
+    )
+    assert high > low

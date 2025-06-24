@@ -13,6 +13,8 @@ class MemoryEntry(BaseModel):
     emotion: Optional[str] = None
     importance: float = 0.0
     embedding: Optional[list[float]] = Field(default=None, repr=False)
+    entity_id: str | None = None
+    state: str = "active"
 
 class EpisodeSummary(BaseModel):
     episode_id: int

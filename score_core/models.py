@@ -27,3 +27,11 @@ class SearchIndex(BaseModel):
     tfidf: 'sklearn.feature_extraction.text.TfidfVectorizer'
     matrix: 'scipy.sparse.csr_matrix'            # TF-IDF 行列
     faiss_index_path: str | None = None          # _faiss_index/index.faiss
+
+class EpisodeSummary(BaseModel):
+    episode_id: int
+    time_span: dict[str, str]   # {"start": "...", "end": "..."}
+    characters: list[str]
+    locations: list[str]
+    major_events: list[str]
+    summary: str

@@ -50,6 +50,10 @@ def _get_tfidf():
 def _get_faiss():
     return faiss.read_index(str(_INDEX_DIR / "index.faiss"))
 
+@functools.lru_cache(maxsize=1)
+def _get_tfidf_matrix():
+    return joblib.load(_INDEX_DIR / "tfidf.npz")
+
 def retrieve(query: str,
              memories: list[MemoryEntry],
              k: int = 8,
@@ -57,13 +61,29 @@ def retrieve(query: str,
 
     now = now or datetime.now(UTC)
 
-    # --- 1) ベクトル検索 ---------------------------
-    sbert = _get_sbert()
-    q_vec = sbert.encode([query], convert_to_numpy=True).astype("float32")
-    faiss_index = _get_faiss()
-    sim, idx = faiss_index.search(q_vec, k=50)         # sim shape (1,50)
-    sim = sim[0]; idx = idx[0]
-    cands = [memories[i] for i in idx]
+    # ---------- Stage-0: TF-IDF で粗フィルタ ----------
+    tfidf = _get_tfidf()
+    tfmat = _get_tfidf_matrix()
+    q_sparse = tfidf.transform([query])
+    # cos類似 => dot / (||q||·||d||) でも良いが一次近似で OK
+    scores = (q_sparse @ tfmat.T).toarray()[0]
+    top_n = min(500, len(scores))
+    top_mask = np.argpartition(-scores, top_n-1)[:top_n]
+    cand_pool = [memories[i] for i in top_mask]
+    cand_scores = scores[top_mask]
+    
+    
+    # ---------- Stage-1: SBERT + FAISS ----------
+    sbert   = _get_sbert()
+    q_vec   = sbert.encode([query], convert_to_numpy=True).astype("float32")
+    faiss_i = _get_faiss()
+    n_total = faiss_i.ntotal
+    k_faiss = min(50, n_total)
+    # FAISS は元プール順なので cand_pool の id を使う
+    _, idx_global = faiss_i.search(q_vec, k=k_faiss)
+    idx_global = idx_global[0]
+    cands =  [memories[i] for i in idx_global]
+    sim = scores[idx_global]
 
     # --- 2) スコア要素計算 -------------------------
     rec  = np.array([_recency_score(m, now)       for m in cands])

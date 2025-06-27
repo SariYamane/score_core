@@ -10,6 +10,10 @@ from score_core import MemoryEntry
 from score_core import retriever
 
 from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+from importlib import reload
+
 import faiss, joblib
 
 
@@ -20,8 +24,8 @@ def small_index(tmp_path_factory):
     idx_dir = tmpdir / "_faiss_index"
     idx_dir.mkdir()
 
-    # ------------- SBERT 384次元インデックスを生成 -------------
     texts = [f"dummy event {i}" for i in range(10)]
+
     sbert = SentenceTransformer("multi-qa-MiniLM-L6-cos-v1")
     emb   = sbert.encode(texts, convert_to_numpy=True).astype("float32")
 
@@ -29,16 +33,18 @@ def small_index(tmp_path_factory):
     ix.add(emb)
 
     faiss.write_index(ix, str(idx_dir / "index.faiss"))   # ← str() が必須
-    joblib.dump(None, idx_dir / "vectorizer.joblib")      # ダミーファイル
 
-    # ------------- retriever を切り替え -----------------------
+    vec = TfidfVectorizer(max_features=1000)
+    tfidf_mat = vec.fit_transform(texts).astype("float32")
+    joblib.dump(vec, idx_dir / "vectorizer.joblib")
+    joblib.dump(tfidf_mat, idx_dir / "tfidf.npz")   # TF-IDF 行列を保存
+
+    reload(retriever)
+    retriever._INDEX_DIR = idx_dir
     retriever._get_faiss.cache_clear()
     retriever._get_tfidf.cache_clear()
+    retriever._get_tfidf_matrix.cache_clear()
     retriever._get_sbert.cache_clear()
-
-    reload(retriever)                         # ここで 384 次元をロード
-    retriever._INDEX_DIR = idx_dir            # 新しい場所に更新
-    retriever._get_faiss.cache_clear()
     
     return tmpdir
 

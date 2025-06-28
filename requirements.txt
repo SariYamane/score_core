@@ -1,0 +1,9 @@
+pytest
+numpy
+joblib
+scipy
+sentence_transformers
+pydantic
+datetime
+scikit-learn
+sentence_transformers

@@ -5,7 +5,7 @@ import pathlib
 from datetime import datetime, UTC
 from typing import List
 import numpy as np, faiss, joblib
-from scipy.sparse import csr_matrix
+
 from .models import MemoryEntry
 from . import models
 from sentence_transformers import SentenceTransformer

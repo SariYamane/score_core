@@ -10,7 +10,14 @@ from .models import MemoryEntry
 from . import models
 from sentence_transformers import SentenceTransformer
 
-_INDEX_DIR = pathlib.Path(__file__).parent / "_faiss_index"
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+import fasteners
+
+import json
+
+from contextlib import contextmanager
+
 
 def score_kernel(sim: np.ndarray,
                  sent_delta: np.ndarray,
@@ -41,10 +48,78 @@ def _sent_delta(mem: MemoryEntry, query_emotion: float) -> float:
 def _get_sbert() -> SentenceTransformer:
     return SentenceTransformer("multi-qa-MiniLM-L6-cos-v1")  # 軽量モデル
 
+_INDEX_DIR = pathlib.Path(__file__).parent / "_faiss_index"
+_INDEX_DIR.mkdir(exist_ok=True)          # ← ディレクトリだけは確実に作る
+
+_META_PATH = _INDEX_DIR / "meta.json"
+IDX_PATH   = _INDEX_DIR / "index.faiss"
+TFIDF_PATH = _INDEX_DIR / "tfidf.pkl"
+VEC_PATH   = _INDEX_DIR / "vectorizer.joblib"
+
+@contextmanager
+def _file_lock():
+    lock = fasteners.InterProcessLock(str(_INDEX_DIR / ".lock"))
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
+def _ensure_index(memories: list[MemoryEntry]):
+    """
+    _INDEX_DIR に index.faiss / tfidf.npz / vectorizer.joblib が無ければ生成する
+    """
+
+    n_docs = len(memories)
+
+    with _file_lock():
+        #--- メタデータの読み込み -------------------------------------------------
+        if _META_PATH.exists():
+            with _META_PATH.open() as f:
+                meta = json.load(f)
+            indexed_docs = meta.get("document_count", -1)
+        else:
+            indexed_docs = -1  # 存在しない扱い
+
+        #--- 既存インデックスが最新なら何もしない -------------------------------
+        if (
+            indexed_docs == n_docs
+            and IDX_PATH.exists()
+            and TFIDF_PATH.exists()
+            and VEC_PATH.exists()
+        ):
+            return  # 早期リターン
+
+    #-----------------------------------------------------------------------
+    print(f"[score_core] building index (documents: {n_docs}) …")
+
+    # --- TF-IDF -------------------------------------------------
+    corpus = [m.content for m in memories]
+    vec = TfidfVectorizer(max_features=30_000)
+    tfmat = vec.fit_transform(corpus)
+    joblib.dump(vec, VEC_PATH)
+    joblib.dump(tfmat, TFIDF_PATH)
+
+    # --- SBERT & FAISS ------------------------------------------
+    sbert = _get_sbert()
+    vecs  = sbert.encode(corpus, convert_to_numpy=True).astype("float32")
+    faiss.normalize_L2(vecs)                       # 内積→cos 類似に合わせる
+    index = faiss.IndexFlatIP(vecs.shape[1])       # 内積類似
+    index.add(vecs)
+    faiss.write_index(index, str(IDX_PATH))
+    
+    _get_faiss.cache_clear()
+    _get_tfidf.cache_clear()
+    _get_tfidf_matrix.cache_clear()
+
+    #--- メタデータを更新 ---------------------------------------------------
+    with _META_PATH.open("w") as f:
+        json.dump({"document_count": n_docs}, f)
+
 # ❷ TF-IDF / FAISS も同じく遅延ロードにしておくとテストが楽
 @functools.lru_cache(maxsize=1)
 def _get_tfidf():
-    return joblib.load(_INDEX_DIR / "vectorizer.joblib")
+    return joblib.load(VEC_PATH)
 
 @functools.lru_cache(maxsize=1)
 def _get_faiss():
@@ -52,13 +127,15 @@ def _get_faiss():
 
 @functools.lru_cache(maxsize=1)
 def _get_tfidf_matrix():
-    return joblib.load(_INDEX_DIR / "tfidf.npz")
+    return joblib.load(_INDEX_DIR / "tfidf.pkl")
 
 def retrieve(query: str,
              memories: list[MemoryEntry],
              k: int = 8,
              now: datetime | None = None) -> list[MemoryEntry]:
 
+    _ensure_index(memories)
+    
     now = now or datetime.now(UTC)
 
     # ---------- Stage-0: TF-IDF で粗フィルタ ----------

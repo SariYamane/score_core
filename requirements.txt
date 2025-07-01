@@ -7,3 +7,4 @@ pydantic
 datetime
 scikit-learn
 sentence_transformers
+fasteners

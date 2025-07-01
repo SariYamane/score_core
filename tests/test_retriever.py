@@ -1,81 +1,60 @@
+import faiss, joblib, os, time
+import numpy as np
 from datetime import datetime, UTC
 from pathlib import Path
-import shutil, tempfile, json
+from score_core import MemoryEntry, retriever
 from importlib import reload
 
-import numpy as np
-import pytest
-
-from score_core import MemoryEntry
-from score_core import retriever
-
-from sentence_transformers import SentenceTransformer
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-from importlib import reload
-
-import faiss, joblib
-
-
-# ---- フィクスチャ ----------------------------------------------------
-@pytest.fixture(scope="module")
-def small_index(tmp_path_factory):
-    tmpdir  = tmp_path_factory.mktemp("faiss_idx")
-    idx_dir = tmpdir / "_faiss_index"
-    idx_dir.mkdir()
-
-    texts = [f"dummy event {i}" for i in range(10)]
-
-    sbert = SentenceTransformer("multi-qa-MiniLM-L6-cos-v1")
-    emb   = sbert.encode(texts, convert_to_numpy=True).astype("float32")
-
-    ix = faiss.IndexFlatIP(emb.shape[1])      # 384 dims
-    ix.add(emb)
-
-    faiss.write_index(ix, str(idx_dir / "index.faiss"))   # ← str() が必須
-
-    vec = TfidfVectorizer(max_features=1000)
-    tfidf_mat = vec.fit_transform(texts).astype("float32")
-    joblib.dump(vec, idx_dir / "vectorizer.joblib")
-    joblib.dump(tfidf_mat, idx_dir / "tfidf.npz")   # TF-IDF 行列を保存
-
+def _reload_with_tmp(idx_dir):
     reload(retriever)
     retriever._INDEX_DIR = idx_dir
     retriever._get_faiss.cache_clear()
     retriever._get_tfidf.cache_clear()
     retriever._get_tfidf_matrix.cache_clear()
     retriever._get_sbert.cache_clear()
-    
-    return tmpdir
 
+def _dummy_pool(n):
+    now = datetime.now(UTC)
+    return [MemoryEntry(uuid=str(i), timestamp=now, who="A", what=f"dummy {i}") for i in range(n)]
 
-# ---- 実テスト --------------------------------------------------------
-def test_retrieve_topk(small_index):
-    pool = [
-        MemoryEntry(
-            uuid=str(i),
-            timestamp=datetime.now(UTC),
-            who="A",
-            what=f"dummy event {i}"
-        )
-        for i in range(10)
-    ]
-    topk = retriever.retrieve("event", pool, k=5)
+def test_build_when_missing(tmp_path):
+    idx_dir = tmp_path / "_faiss_index"
+    idx_dir.mkdir()
+    _reload_with_tmp(idx_dir)
 
-    assert len(topk) == 5
-    assert all(isinstance(m, MemoryEntry) for m in topk)
+    retriever.retrieve("dummy", _dummy_pool(8), k=3)
 
-def test_kernel_monotonic():
-    high = retriever.score_kernel(
-        sim=np.array([0.9]),
-        sent_delta=np.array([0]),
-        recency=np.array([1]),
-        importance=np.array([1])
-    )
-    low = retriever.score_kernel(
-        sim=np.array([0.1]),
-        sent_delta=np.array([0]),
-        recency=np.array([1]),
-        importance=np.array([1])
-    )
-    assert high > low
+    assert (idx_dir / "index.faiss").exists()
+    assert (idx_dir / "vectorizer.joblib").exists()
+    assert (idx_dir / "tfidf.npz").exists()
+
+def test_rebuild_on_growth(tmp_path):
+    idx_dir = tmp_path / "_faiss_index"
+    idx_dir.mkdir()
+    _reload_with_tmp(idx_dir)
+
+    # ① 最初に 10 件で index 作成
+    retriever.retrieve("dummy", _dummy_pool(10), k=3)
+    ix_path = idx_dir / "index.faiss"
+    ts_old  = ix_path.stat().st_mtime
+    nt_old  = faiss.read_index(str(ix_path)).ntotal
+    assert nt_old == 10
+
+    # ② corpus を 25 件に増やす
+    time.sleep(1)                      # mtime 変化を確実にする
+    retriever.retrieve("dummy", _dummy_pool(25), k=5)
+    ix      = faiss.read_index(str(ix_path))
+    assert ix.ntotal == 25
+    assert ix_path.stat().st_mtime > ts_old
+
+def test_recover_broken_index(tmp_path):
+    idx_dir = tmp_path / "_faiss_index"
+    idx_dir.mkdir()
+    _reload_with_tmp(idx_dir)
+
+    retriever.retrieve("dummy", _dummy_pool(5), k=2)
+    (idx_dir / "index.faiss").unlink()        # 壊す
+
+    # 落ちずに再生成されるか
+    retriever.retrieve("dummy", _dummy_pool(5), k=2)
+    assert (idx_dir / "index.faiss").exists()

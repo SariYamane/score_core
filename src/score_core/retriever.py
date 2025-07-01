@@ -51,10 +51,8 @@ def _get_sbert() -> SentenceTransformer:
 _INDEX_DIR = pathlib.Path(__file__).parent / "_faiss_index"
 _INDEX_DIR.mkdir(exist_ok=True)          # ← ディレクトリだけは確実に作る
 
-_META_PATH = _INDEX_DIR / "meta.json"
-IDX_PATH   = _INDEX_DIR / "index.faiss"
-TFIDF_PATH = _INDEX_DIR / "tfidf.pkl"
-VEC_PATH   = _INDEX_DIR / "vectorizer.joblib"
+def _idx_path(name):
+    return _INDEX_DIR / name
 
 @contextmanager
 def _file_lock():
@@ -74,8 +72,8 @@ def _ensure_index(memories: list[MemoryEntry]):
 
     with _file_lock():
         #--- メタデータの読み込み -------------------------------------------------
-        if _META_PATH.exists():
-            with _META_PATH.open() as f:
+        if _idx_path("meta.json").exists():
+            with _idx_path("meta.json").open("r") as f:
                 meta = json.load(f)
             indexed_docs = meta.get("document_count", -1)
         else:
@@ -84,9 +82,9 @@ def _ensure_index(memories: list[MemoryEntry]):
         #--- 既存インデックスが最新なら何もしない -------------------------------
         if (
             indexed_docs == n_docs
-            and IDX_PATH.exists()
-            and TFIDF_PATH.exists()
-            and VEC_PATH.exists()
+            and _idx_path("index.faiss").exists()
+            and _idx_path("tfidf.npz").exists()
+            and _idx_path("vectorizer.joblib").exists()
         ):
             return  # 早期リターン
 
@@ -94,11 +92,11 @@ def _ensure_index(memories: list[MemoryEntry]):
     print(f"[score_core] building index (documents: {n_docs}) …")
 
     # --- TF-IDF -------------------------------------------------
-    corpus = [m.content for m in memories]
+    corpus = [m.what for m in memories]
     vec = TfidfVectorizer(max_features=30_000)
     tfmat = vec.fit_transform(corpus)
-    joblib.dump(vec, VEC_PATH)
-    joblib.dump(tfmat, TFIDF_PATH)
+    joblib.dump(vec, _idx_path("vectorizer.joblib"), compress=0)
+    joblib.dump(tfmat, _idx_path("tfidf.npz"), compress=0)
 
     # --- SBERT & FAISS ------------------------------------------
     sbert = _get_sbert()
@@ -106,20 +104,20 @@ def _ensure_index(memories: list[MemoryEntry]):
     faiss.normalize_L2(vecs)                       # 内積→cos 類似に合わせる
     index = faiss.IndexFlatIP(vecs.shape[1])       # 内積類似
     index.add(vecs)
-    faiss.write_index(index, str(IDX_PATH))
+    faiss.write_index(index, str(_idx_path("index.faiss")))
     
     _get_faiss.cache_clear()
     _get_tfidf.cache_clear()
     _get_tfidf_matrix.cache_clear()
 
     #--- メタデータを更新 ---------------------------------------------------
-    with _META_PATH.open("w") as f:
+    with _idx_path("meta.json").open("w") as f:
         json.dump({"document_count": n_docs}, f)
 
 # ❷ TF-IDF / FAISS も同じく遅延ロードにしておくとテストが楽
 @functools.lru_cache(maxsize=1)
 def _get_tfidf():
-    return joblib.load(VEC_PATH)
+    return joblib.load(_idx_path("vectorizer.joblib"))
 
 @functools.lru_cache(maxsize=1)
 def _get_faiss():
@@ -127,13 +125,23 @@ def _get_faiss():
 
 @functools.lru_cache(maxsize=1)
 def _get_tfidf_matrix():
-    return joblib.load(_INDEX_DIR / "tfidf.pkl")
+    tfidf_path = _idx_path("tfidf.npz")
+    try:
+        return joblib.load(tfidf_path)
+    except FileNotFoundError:
+        # インデックスが壊れている／書込み途中だった場合は作り直す
+        print("[score_core] tfidf.npz missing – rebuilding index …")
+        _ensure_index(_MEM_CACHE)       # _MEM_CACHE は直前に渡した memories を保持
+        return joblib.load(tfidf_path)
 
 def retrieve(query: str,
              memories: list[MemoryEntry],
              k: int = 8,
              now: datetime | None = None) -> list[MemoryEntry]:
-
+    
+    global _MEM_CACHE
+    _MEM_CACHE = memories
+    
     _ensure_index(memories)
     
     now = now or datetime.now(UTC)

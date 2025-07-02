@@ -144,7 +144,7 @@ def retrieve(query: str,
     
     _ensure_index(memories)
     
-    now = now or datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
 
     # ---------- Stage-0: TF-IDF で粗フィルタ ----------
     tfidf = _get_tfidf()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import functools
 import pathlib
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from typing import List
 import numpy as np, faiss, joblib
 
@@ -144,7 +144,7 @@ def retrieve(query: str,
     
     _ensure_index(memories)
     
-    now = now or datetime.now(UTC)
+    now = now or datetime.now(timezone.utc)
 
     # ---------- Stage-0: TF-IDF で粗フィルタ ----------
     tfidf = _get_tfidf()

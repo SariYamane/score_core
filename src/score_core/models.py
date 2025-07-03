@@ -15,11 +15,9 @@ class MemoryEntry(BaseModel):
     embedding: Optional[list[float]] = Field(default=None, repr=False)
     entity_id: Optional[str] = None
     state: str = "active"
-
     @property
     def content(self) -> str:
         return self.what
-
     @content.setter
     def content(self, value: str) -> None:
         self.what = value

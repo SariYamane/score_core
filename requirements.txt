@@ -8,3 +8,4 @@ datetime
 scikit-learn
 sentence_transformers
 fasteners
+openai==0.28.1

@@ -33,8 +33,16 @@ def score_kernel(sim: np.ndarray,
     return np.exp(s)
 
 def _recency_score(mem: MemoryEntry, now: datetime) -> float:
-    hours = (now - mem.timestamp).total_seconds() / 3600
-    return max(0.0, 1 - hours / 48)          # 48h で 0 になる線形減衰
+    ts = mem.timestamp
+    
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+        
+    hours = (now - ts).total_seconds() / 3600
+    return 1 / (1+hours)          # 48h で 0 になる線形減衰
 
 def _importance_score(mem: MemoryEntry) -> float:
     return min(max(mem.importance / 10, 0), 1)
